@@ -1,146 +1,115 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import mongoose from 'mongoose';
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+require('dotenv').config();
 
-// Import routes
-import authRoutes from './routes/auth.js';
-import dataRoutes from './routes/data.js';
-import analyticsRoutes from './routes/analytics.js';
-import aiRoutes from './routes/ai.js';
-import billingRoutes from './routes/billing.js';
-import userRoutes from './routes/user.js';
+const Todo = require('./models/Todo');
 
-// Load environment variables
-dotenv.config();
-
-// Create Express app
 const app = express();
-
-// Prometheus monitoring setup starts here
-import client from 'prom-client';
-
-// Create a Registry
-const register = new client.Registry();
-client.collectDefaultMetrics({ register });
-
-// Custom metrics
-const httpRequestDurationMicroseconds = new client.Histogram({
-  name: 'http_request_duration_ms',
-  help: 'Duration of HTTP requests in ms',
-  labelNames: ['method', 'route', 'status_code'],
-  buckets: [50, 100, 200, 500, 1000, 2000],
-});
-
-const errorCounter = new client.Counter({
-  name: 'http_requests_errors_total',
-  help: 'Total number of failed HTTP requests',
-  labelNames: ['method', 'route', 'status_code'],
-});
-
-// Middleware to track request duration and errors
-app.use((req, res, next) => {
-  const start = Date.now();
-
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    httpRequestDurationMicroseconds
-      .labels(req.method, req.path, res.statusCode)
-      .observe(duration);
-
-    if (res.statusCode >= 400) {
-      errorCounter.labels(req.method, req.path, res.statusCode).inc();
-    }
-  });
-
-  next();
-});
-
-// Expose metrics endpoint
-app.get('/metrics', async (req, res) => {
-  res.set('Content-Type', register.contentType);
-  res.end(await register.metrics());
-});
-
-//  Prometheus monitoring setup ends here
-
-
-
 const PORT = process.env.PORT || 5000;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://mongodb:27017/todoapp';
 
-// Security middleware
-// CORS configuration for docker and local development
-// app.use(cors({
-//   origin: process.env.FRONTEND_URL || 'http://127.0.0.1:5173',
-//   credentials: true
-// }));
-
-// More flexible CORS to allow localhost and 127.0.0.1 for k8s
-app.use(cors({
-  origin: function(origin, callback) {
-    if (!origin) return callback(null, true); // curl/Postman
-    // Allow localhost/127.0.0.1 for port-forward testing
-    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
-      return callback(null, true);
-    }
-    // Allow FRONTEND_URL from env
-    if (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL) {
-      return callback(null, true);
-    }
-    callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
-
-
-app.use(helmet());
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
-});
-app.use(limiter);
-
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Middleware
+app.use(cors());
+app.use(express.json());
 
 // Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/smart-saas-dashboard')
-  .then(() => console.log('✅ Connected to MongoDB'))
-  .catch(err => console.error('❌ MongoDB connection error:', err));
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('Connected to MongoDB'))
+.catch((err) => console.error('MongoDB connection error:', err));
 
 // Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/data', dataRoutes);
-app.use('/api/analytics', analyticsRoutes);
-app.use('/api/ai', aiRoutes);
-app.use('/api/billing', billingRoutes);
-app.use('/api/user', userRoutes);
+
+// GET - Get all todos
+app.get('/api/todos', async (req, res) => {
+  try {
+    const todos = await Todo.find().sort({ createdAt: -1 });
+    res.json(todos);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST - Add a new todo
+app.post('/api/todos', async (req, res) => {
+  try {
+    const { title, description } = req.body;
+    
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+
+    const todo = new Todo({
+      title,
+      description
+    });
+
+    const savedTodo = await todo.save();
+    res.status(201).json(savedTodo);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// POST - Delete a todo
+app.post('/api/todos/delete', async (req, res) => {
+  try {
+    const { id } = req.body;
+    
+    if (!id) {
+      return res.status(400).json({ error: 'Todo ID is required' });
+    }
+
+    const deletedTodo = await Todo.findByIdAndDelete(id);
+    
+    if (!deletedTodo) {
+      return res.status(404).json({ error: 'Todo not found' });
+    }
+
+    res.json({ message: 'Todo deleted successfully', deletedTodo });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// POST - Modify/Update a todo
+app.post('/api/todos/modify', async (req, res) => {
+  try {
+    const { id, title, description, completed } = req.body;
+    
+    if (!id) {
+      return res.status(400).json({ error: 'Todo ID is required' });
+    }
+
+    const updateData = {};
+    if (title !== undefined) updateData.title = title;
+    if (description !== undefined) updateData.description = description;
+    if (completed !== undefined) updateData.completed = completed;
+
+    const updatedTodo = await Todo.findByIdAndUpdate(
+      id,
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedTodo) {
+      return res.status(404).json({ error: 'Todo not found' });
+    }
+
+    res.json(updatedTodo);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Smart SaaS Dashboard API is running' });
+app.get('/health', (req, res) => {
+  res.json({ status: 'Server is running' });
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ 
-    message: 'Something went wrong!',
-    error: process.env.NODE_ENV === 'development' ? err.message : undefined
-  });
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ message: 'Route not found' });
-});
-
-app.listen(PORT,'0.0.0.0',() => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📊 Dashboard API available at http://localhost:${PORT}/api`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server is running on port ${PORT}`);
 });
